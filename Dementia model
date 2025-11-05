@@ -88,7 +88,7 @@ def smooth_series(values: List[float], window: int = 3) -> List[float]:
 
 
 general_config = {
-    'number_of_timesteps': 17,
+    'number_of_timesteps': 18,
     'population': 33167098,
          
     'time_step_years': 1,
@@ -98,10 +98,47 @@ general_config = {
 
     "open_population": {
         "use": True,                 # set True to enable new entrants
-        "entrants_per_year": 800000,       
-        "fixed_entry_age": 35,            # force all new entrants to start at age 35
-        # if omitted, we’ll reuse existing config’s sex/age/risk specs
-        "age_band_weights": None,     # e.g. {(35,49):0.2,(50,64):0.4,(65,79):0.3,(80,100):0.1}
+        "entrants_per_year": 800000,
+        "fixed_entry_age": None,     # allow age distribution to evolve over time
+        # entrant age-bands scale relative to baseline weights by milestone year
+        "age_band_multiplier_schedule": {
+            2025: {
+                (35, 49): 1.03,
+                (50, 64): 1.00,
+                (65, 69): 1.05,
+                (70, 74): 0.99,
+                (75, 79): 1.03,
+                (80, 84): 1.09,
+                (85, 100): 1.04,
+            },
+            2030: {
+                (35, 49): 1.10,
+                (50, 64): 0.97,
+                (65, 69): 1.21,
+                (70, 74): 1.09,
+                (75, 79): 0.95,
+                (80, 84): 1.37,
+                (85, 100): 1.21,
+            },
+            2035: {
+                (35, 49): 1.14,
+                (50, 64): 0.97,
+                (65, 69): 1.23,
+                (70, 74): 1.26,
+                (75, 79): 1.06,
+                (80, 84): 1.28,
+                (85, 100): 1.52,
+            },
+            2040: {
+                (35, 49): 1.15,
+                (50, 64): 1.01,
+                (65, 69): 1.16,
+                (70, 74): 1.29,
+                (75, 79): 1.23,
+                (80, 84): 1.44,
+                (85, 100): 1.62,
+            },
+        },
         "sex_distribution": None      # e.g. {"female":0.52,"male":0.48}
     },
 
@@ -109,7 +146,14 @@ general_config = {
     'report_paf_to_terminal': False,      # suppress console logging of PAF summary
     'compute_paf_in_main': False,         # skip running the heavy PAF counterfactual unless needed
 
-    'initial_stage_mix': {     #(VERIFIED, (Primary Care Dementia Data & Economic Impact Of Dementia CF Report))    # proportions by sex; each nested dict must sum to 1, 
+    # Optional: override baseline (time step 0) summary metrics with known real-world data
+    'initial_summary_overrides': {
+        'incident_onsets': 86000,
+        'deaths' : 750000,
+        'entrants' : 800000
+    },
+
+    'initial_stage_mix': {     #(VERIFIED, (Primary Care Dementia Data & Economic Impact Of Dementia CF Report))    # proportions by sex; each nested dict must sum to 1,
         'female': {
             'cognitively_normal': 0.98,
             'mild': 0.00994,
@@ -164,7 +208,7 @@ general_config = {
         # 'normal_to_mild': 6,
         'mild_to_moderate': 2.2,
         'moderate_to_severe': 2,
-        'severe_to_death': 2.8,
+        'severe_to_death': 4,
     },
 
     # (VERIFIED, ONS) # Background mortality (annual absolute hazards by age band; replace with ONS by converting annual probability to hazard h = -ln(1-prob)) 
@@ -310,9 +354,9 @@ general_config = {
     # (VERIFIED, Crowell et al. 2023) # Dementia severity multipliers on background mortality hazard
     'dementia_mortality_multipliers': {
         'cognitively_normal': 1.0,   
-        'mild': 1.5,          #(1.49-2.91)
-        'moderate': 1.7,      #(1.94-3.35)
-        'severe': 2,        #(4.36-8.80)  
+        'mild': 1.0,          #(1.49-2.91)
+        'moderate': 1.0,      #(1.94-3.35)
+        'severe': 1.0,        #(4.36-8.80)  ###
     },
 
     # Risk factor definitions with prevalence and hazard ratios by transition, meta-analysis and large cohort studies for onset, will be harder to find for progression HRs
@@ -617,6 +661,70 @@ def sample_age_from_band_weights(band_weights: Dict[Tuple[int, int], float]) -> 
 
 # Sex and risk-factor helpers
 
+def age_band_weights_for_year(open_pop_cfg: dict,
+                              year: int,
+                              baseline_weights: Dict[Tuple[int, int], float]) -> Optional[Dict[Tuple[int, int], float]]:
+    """
+    Return entrant age-band weights for the provided calendar year by scaling baseline
+    weights with any milestone multipliers supplied in the open-population configuration.
+    """
+    multiplier_schedule = open_pop_cfg.get("age_band_multiplier_schedule")
+    if not multiplier_schedule:
+        # fall back to legacy fixed weights if provided
+        schedule = open_pop_cfg.get("age_band_weights_schedule")
+        if schedule:
+            milestone_years = sorted(schedule)
+            if not milestone_years:
+                return open_pop_cfg.get("age_band_weights")
+            if year <= milestone_years[0]:
+                return schedule[milestone_years[0]]
+            if year >= milestone_years[-1]:
+                return schedule[milestone_years[-1]]
+            for start, end in zip(milestone_years, milestone_years[1:]):
+                if start <= year <= end:
+                    span = end - start
+                    weight = 0.0 if span <= 0 else (year - start) / span
+                    bands = set(schedule[start]) | set(schedule[end])
+                    return {
+                        band: ((1.0 - weight) * schedule[start].get(band, 0.0) +
+                               weight * schedule[end].get(band, 0.0))
+                        for band in bands
+                    }
+        return open_pop_cfg.get("age_band_weights")
+
+    milestone_years = sorted(multiplier_schedule)
+    if not milestone_years:
+        return baseline_weights
+
+    if year <= milestone_years[0]:
+        multipliers = multiplier_schedule[milestone_years[0]]
+    elif year >= milestone_years[-1]:
+        multipliers = multiplier_schedule[milestone_years[-1]]
+    else:
+        multipliers = None
+        for start, end in zip(milestone_years, milestone_years[1:]):
+            if start <= year <= end:
+                span = end - start
+                frac = 0.0 if span <= 0 else (year - start) / span
+                bands = set(multiplier_schedule[start]) | set(multiplier_schedule[end])
+                multipliers = {
+                    band: ((1.0 - frac) * multiplier_schedule[start].get(band, 1.0) +
+                           frac * multiplier_schedule[end].get(band, 1.0))
+                    for band in bands
+                }
+                break
+        if multipliers is None:
+            multipliers = multiplier_schedule.get(year, {})
+
+    scaled = {
+        band: baseline_weights.get(band, 0.0) * multipliers.get(band, 1.0)
+        for band in baseline_weights
+    }
+    total = sum(scaled.values())
+    if total <= 0:
+        return baseline_weights
+    return {band: value / total for band, value in scaled.items()}
+
 def add_new_entrants(population_state: Dict[int, dict],
                      config: dict,
                      next_id_start: int,
@@ -633,7 +741,8 @@ def add_new_entrants(population_state: Dict[int, dict],
         return next_id_start, 0
 
     # fall back to global config if open-pop overrides are not provided
-    age_band_weights = op.get("age_band_weights") or config.get("initial_age_band_weights", {})
+    baseline_weights = config.get("initial_age_band_weights", {})
+    age_band_weights = age_band_weights_for_year(op, calendar_year, baseline_weights) or baseline_weights
     sex_dist = op.get("sex_distribution") or config.get("sex_distribution", {})
     base_year = int(config.get('base_year', calendar_year))
     fixed_entry_age = op.get("fixed_entry_age")
@@ -1971,6 +2080,24 @@ def run_model(config: dict, seed: Optional[int] = None) -> dict:
     incidence_age_onsets: Dict[Tuple[int, Optional[int]], int] = defaultdict(int)
 
     baseline_summary = summarize_population_state(population_state, 0, base_year, entrants=0, deaths=0)
+    baseline_overrides = config.get('initial_summary_overrides') or {}
+    if baseline_overrides:
+        baseline_summary.update(baseline_overrides)
+        if 'incident_onsets' in baseline_overrides:
+            alive = baseline_summary.get('population_alive', 0) or 0
+            baseline_summary['incident_onsets'] = baseline_overrides['incident_onsets']
+            baseline_summary['incidence_per_1000_alive'] = (
+                (baseline_summary['incident_onsets'] / alive) * 1000.0 if alive else 0.0
+            )
+        if 'deaths' in baseline_overrides:
+            baseline_summary['deaths'] = baseline_overrides['deaths']
+        if 'entrants' in baseline_overrides:
+            baseline_summary['entrants'] = baseline_overrides['entrants']
+        if 'calendar_year' in baseline_overrides:
+            baseline_summary['calendar_year'] = baseline_overrides['calendar_year']
+        if 'time_step' in baseline_overrides:
+            baseline_summary['time_step'] = baseline_overrides['time_step']
+
     create_time_step_dictionary(summary_history, 0, baseline_summary)
     generate_output(summary_history, 0)
 
