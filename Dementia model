@@ -148,9 +148,8 @@ general_config = {
 
     # Optional: override baseline (time step 0) summary metrics with known real-world data
     'initial_summary_overrides': {
-        'incident_onsets': 86000,
-        'deaths' : 750000,
-        'entrants' : 800000
+        'deaths': 750000,
+        'entrants': 800000,
     },
 
     'initial_stage_mix': {     #(VERIFIED, (Primary Care Dementia Data & Economic Impact Of Dementia CF Report))    # proportions by sex; each nested dict must sum to 1,
@@ -201,7 +200,14 @@ general_config = {
     },
 
     # #(VERIFED, NHS England)  #   Baseline annual probability of onset if no duration is provided for normal->mild
-    'base_onset_probability': 0.0025,    
+    'base_onset_probability': 0.0025,
+
+    # Optional macro incidence growth (compounds onset hazard per calendar year)
+    'incidence_growth': {
+        'use': True,
+        'annual_rate': 0.02,
+        'reference_year': 2023,
+    },
 
     ## (VERIFIED, Tariot et al(2024)) # Mean durations (years) => baseline hazards = 1/duration under exponential assumption 
     'stage_transition_durations': {
@@ -1701,6 +1707,16 @@ def update_dementia_progression(population_state: Dict[int, dict],
                                 ) -> Tuple[int, int, Dict[Tuple[str, str], int], Dict[str, int]]:
     """Advance dementia stages and apply background/dementia mortality using hazards."""
     dt = config['time_step_years']
+    base_year = int(config.get('base_year', 2023))
+    calendar_year = base_year + time_step
+    growth_cfg = config.get('incidence_growth') or {}
+    if growth_cfg.get('use'):
+        rate = float(growth_cfg.get('annual_rate', 0.0))
+        ref_year = int(growth_cfg.get('reference_year', base_year))
+        years_since_ref = max(0, calendar_year - ref_year)
+        incidence_growth_multiplier = (1.0 + rate) ** years_since_ref
+    else:
+        incidence_growth_multiplier = 1.0
     deaths_this_step = 0
     onsets_this_step = 0
     transition_counter: Counter = Counter()
@@ -1765,6 +1781,7 @@ def update_dementia_progression(population_state: Dict[int, dict],
                 p = transition_prob_from_config(config, person, 'normal_to_mild')
             else:
                 h0 = prob_to_hazard(config.get('base_onset_probability', 0.0), dt=dt)
+                h0 *= incidence_growth_multiplier
                 age_hr = get_age_hr_for_transition(person['age'], config, 'onset')  # CHANGED
                 h = apply_hazard_ratios(
                     h0,
@@ -3509,3 +3526,4 @@ def run_and_save(sub, sex_label, save_dir):
 # -------- 5. Run for both sexes --------
 res_f = run_and_save(df[df["sex"]=="F"], "Female", save_dir)
 res_m = run_and_save(df[df["sex"]=="M"], "Male", save_dir)
+
