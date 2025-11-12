@@ -3556,7 +3556,7 @@ def plot_lifetime_risk_by_entry_age(model_results,
 
 # Export
 
-def export_results_to_excel(model_results, path="PD_AD.xlsx"):
+def export_results_to_excel(model_results, path="PD_AD_PD50.xlsx"):
     summaries = summaries_to_dataframe(model_results)
     if summaries.empty:
         print("No summary data available; nothing exported.")
