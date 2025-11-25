@@ -317,7 +317,7 @@ general_config = {
 
     # Probabilistic sensitivity analysis configuration (sampling specs defined below)
     'psa': {
-        'use': True,
+        'use': False,
         'iterations': 1000,
         'seed': 20231113,
         'n_jobs': None,             # Number of parallel jobs (None = use all CPU cores)
