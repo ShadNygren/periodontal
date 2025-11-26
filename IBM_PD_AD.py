@@ -2959,6 +2959,289 @@ def save_dataframe_compressed(df: pd.DataFrame, filepath: Union[str, Path],
     print(f"Saved compressed DataFrame to {filepath} ({size_mb:.2f} MB)")
 
 
+# Two-Level ANOVA-based PSA (O'Hagan et al. 2007 method)
+
+def estimate_variance_components_pilot(base_config: dict,
+                                       psa_cfg: dict,
+                                       n_outer: int = 10,
+                                       n_inner_list: Optional[List[int]] = None,
+                                       seed: Optional[int] = None) -> dict:
+    """
+    Pilot study to estimate variance components using ANOVA decomposition.
+
+    This implements the O'Hagan et al. (2007) method for patient-level simulation models.
+    Runs a small number of parameter sets (n_outer) with multiple population sizes (n_inner_list)
+    to estimate:
+    - σ²_between: Variance due to parameter uncertainty (PSA signal)
+    - σ²_within: Variance due to stochastic patient sampling (noise)
+
+    Args:
+        base_config: Base configuration dictionary
+        psa_cfg: PSA configuration
+        n_outer: Number of parameter sets to sample (default 10)
+        n_inner_list: List of population sizes to test (default [1000, 5000, 10000])
+        seed: Random seed
+
+    Returns:
+        Dictionary with variance estimates and optimal n recommendation
+    """
+    if n_inner_list is None:
+        n_inner_list = [1000, 5000, 10000]
+
+    print(f"\n{'='*60}")
+    print("PILOT STUDY: Estimating Variance Components (O'Hagan Method)")
+    print(f"{'='*60}")
+    print(f"Outer iterations (parameter sets): {n_outer}")
+    print(f"Inner population sizes to test: {n_inner_list}")
+
+    base_seed = seed if seed is not None else psa_cfg.get('seed', 42)
+    rng = np.random.default_rng(base_seed)
+    psa_meta = copy.deepcopy(psa_cfg)
+
+    # Save original population size
+    original_pop = base_config.get('population', 33167098)
+
+    results_by_n = {}
+
+    for n_inner in n_inner_list:
+        print(f"\nTesting with n={n_inner} individuals per parameter set...")
+
+        # Create modified config with reduced population
+        test_config = copy.deepcopy(base_config)
+        test_config['population'] = n_inner
+
+        # Run n_outer parameter sets
+        outcomes = []
+        for i in range(n_outer):
+            draw_seed = int(rng.integers(0, 2**32 - 1))
+            draw_config = apply_psa_draw(test_config, psa_meta, rng)
+
+            model_seed = int(rng.integers(0, 2**32 - 1))
+            draw_results = run_model(draw_config, seed=model_seed)
+            metrics = extract_psa_metrics(draw_results)
+            outcomes.append(metrics)
+
+        # Calculate variance components using ANOVA
+        outcomes_df = pd.DataFrame(outcomes)
+
+        # For each outcome metric, estimate variance
+        variance_stats = {}
+        for col in outcomes_df.columns:
+            if col == 'iteration' or not pd.api.types.is_numeric_dtype(outcomes_df[col]):
+                continue
+
+            values = outcomes_df[col].dropna()
+            if len(values) < 2:
+                continue
+
+            # Total variance at this sample size
+            total_var = float(values.var())
+            mean_val = float(values.mean())
+
+            variance_stats[col] = {
+                'mean': mean_val,
+                'total_variance': total_var,
+                'n': n_inner
+            }
+
+        results_by_n[n_inner] = variance_stats
+        print(f"  Completed {n_outer} parameter sets with n={n_inner}")
+
+    # Estimate σ²_between and σ²_within using variance at different n
+    print(f"\n{'='*60}")
+    print("Variance Component Estimates:")
+    print(f"{'='*60}")
+
+    variance_components = {}
+
+    # For each metric, fit Var(ȳ) = σ²_between + σ²_within/n
+    for metric in results_by_n[n_inner_list[0]].keys():
+        try:
+            # Extract variance vs 1/n data
+            n_vals = []
+            var_vals = []
+
+            for n_inner in n_inner_list:
+                if metric in results_by_n[n_inner]:
+                    n_vals.append(n_inner)
+                    var_vals.append(results_by_n[n_inner][metric]['total_variance'])
+
+            if len(n_vals) < 2:
+                continue
+
+            # Linear regression: Var = σ²_between + σ²_within * (1/n)
+            one_over_n = np.array([1.0/n for n in n_vals])
+            var_array = np.array(var_vals)
+
+            # Fit: y = a + b*x where y=Var, x=1/n, a=σ²_between, b=σ²_within
+            coeffs = np.polyfit(one_over_n, var_array, 1)
+            sigma_within_sq = coeffs[0]  # Slope
+            sigma_between_sq = coeffs[1]  # Intercept
+
+            # Ensure non-negative
+            sigma_between_sq = max(0, sigma_between_sq)
+            sigma_within_sq = max(0, sigma_within_sq)
+
+            variance_components[metric] = {
+                'sigma_between_sq': sigma_between_sq,
+                'sigma_within_sq': sigma_within_sq,
+                'variance_ratio': sigma_between_sq / sigma_within_sq if sigma_within_sq > 0 else 0
+            }
+
+            print(f"\n{metric}:")
+            print(f"  σ²_between (parameter uncertainty): {sigma_between_sq:.6e}")
+            print(f"  σ²_within (stochastic noise): {sigma_within_sq:.6e}")
+            print(f"  Ratio (signal/noise): {variance_components[metric]['variance_ratio']:.4f}")
+
+        except Exception as e:
+            print(f"\nWarning: Could not estimate variance for {metric}: {e}")
+            continue
+
+    # Calculate optimal n for a given precision target
+    # For 95% CI width to be dominated by parameter uncertainty (not MC noise):
+    # We want σ²_within/n << σ²_between
+    # Rule of thumb: σ²_within/n ≤ 0.1 * σ²_between
+
+    print(f"\n{'='*60}")
+    print("Optimal Sample Size Recommendations:")
+    print(f"{'='*60}")
+
+    optimal_n_recommendations = {}
+
+    for metric, components in variance_components.items():
+        sigma_between_sq = components['sigma_between_sq']
+        sigma_within_sq = components['sigma_within_sq']
+
+        if sigma_between_sq > 0:
+            # n such that σ²_within/n = 0.1 * σ²_between
+            n_optimal_conservative = int(np.ceil(sigma_within_sq / (0.1 * sigma_between_sq)))
+            # n such that σ²_within/n = 0.25 * σ²_between (less conservative)
+            n_optimal_moderate = int(np.ceil(sigma_within_sq / (0.25 * sigma_between_sq)))
+
+            optimal_n_recommendations[metric] = {
+                'conservative': min(n_optimal_conservative, original_pop),
+                'moderate': min(n_optimal_moderate, original_pop)
+            }
+        else:
+            optimal_n_recommendations[metric] = {
+                'conservative': n_inner_list[-1],
+                'moderate': n_inner_list[-1]
+            }
+
+    # Get representative recommendation (use first key outcome)
+    key_metrics = ['total_qalys', 'total_costs', 'total_dementia_onsets']
+    recommended_n = None
+
+    for key_metric in key_metrics:
+        if key_metric in optimal_n_recommendations:
+            rec = optimal_n_recommendations[key_metric]
+            recommended_n = rec['moderate']
+            print(f"\nFor {key_metric}:")
+            print(f"  Conservative n (MC noise < 10% of PSA signal): {rec['conservative']:,}")
+            print(f"  Moderate n (MC noise < 25% of PSA signal): {rec['moderate']:,}")
+            break
+
+    if recommended_n is None and optimal_n_recommendations:
+        # Fall back to first available metric
+        first_metric = list(optimal_n_recommendations.keys())[0]
+        recommended_n = optimal_n_recommendations[first_metric]['moderate']
+        print(f"\nRecommended n (based on {first_metric}): {recommended_n:,}")
+
+    print(f"\n{'='*60}")
+    print(f"RECOMMENDATION: Use n ≈ {recommended_n:,} individuals per PSA iteration")
+    print(f"This is {original_pop/recommended_n:.1f}x smaller than full population ({original_pop:,})")
+    print(f"{'='*60}\n")
+
+    return {
+        'variance_components': variance_components,
+        'optimal_n_recommendations': optimal_n_recommendations,
+        'recommended_n': recommended_n,
+        'original_population': original_pop,
+        'pilot_n_outer': n_outer,
+        'pilot_n_inner_tested': n_inner_list,
+        'results_by_n': results_by_n
+    }
+
+
+def run_two_level_psa(base_config: dict,
+                      psa_cfg: Optional[dict] = None,
+                      *,
+                      n_outer: int = 1000,
+                      n_inner: Optional[int] = None,
+                      variance_pilot_results: Optional[dict] = None,
+                      collect_draw_level: bool = False,
+                      seed: Optional[int] = None,
+                      n_jobs: Optional[int] = None) -> dict:
+    """
+    Two-level PSA using O'Hagan et al. (2007) ANOVA method.
+
+    Dramatically reduces computational cost by using reduced population size (n_inner)
+    per parameter set while maintaining accuracy of 95% confidence intervals.
+
+    Args:
+        base_config: Base configuration
+        psa_cfg: PSA configuration
+        n_outer: Number of PSA iterations (parameter sets)
+        n_inner: Population size per iteration (if None, uses full population)
+        variance_pilot_results: Results from estimate_variance_components_pilot()
+        collect_draw_level: Whether to return all draw-level data
+        seed: Random seed
+        n_jobs: Number of parallel jobs
+
+    Returns:
+        Dictionary with PSA results including 95% CIs
+    """
+    psa_meta = copy.deepcopy(psa_cfg or base_config.get('psa') or {})
+
+    # Determine n_inner
+    original_pop = base_config.get('population', 33167098)
+
+    if n_inner is None:
+        if variance_pilot_results and 'recommended_n' in variance_pilot_results:
+            n_inner = variance_pilot_results['recommended_n']
+            print(f"\nUsing recommended n={n_inner:,} from pilot study")
+        else:
+            n_inner = original_pop
+            print(f"\nNo pilot results provided. Using full population n={n_inner:,}")
+            print("Consider running estimate_variance_components_pilot() first for efficiency!")
+
+    # Create modified config with reduced population
+    psa_config = copy.deepcopy(base_config)
+    psa_config['population'] = n_inner
+
+    print(f"\n{'='*60}")
+    print("TWO-LEVEL PSA (O'Hagan Method)")
+    print(f"{'='*60}")
+    print(f"Outer iterations (N): {n_outer}")
+    print(f"Inner population (n): {n_inner:,}")
+    print(f"Total simulated individuals: {n_outer * n_inner:,}")
+    print(f"Reduction vs full PSA: {(original_pop * n_outer) / (n_inner * n_outer):.1f}x fewer individuals")
+    print(f"{'='*60}\n")
+
+    # Run standard PSA but with reduced population
+    results = run_probabilistic_sensitivity_analysis(
+        psa_config,
+        psa_meta,
+        collect_draw_level=collect_draw_level,
+        seed=seed,
+        n_jobs=n_jobs
+    )
+
+    # Add metadata about two-level design
+    results['two_level_psa'] = {
+        'n_outer': n_outer,
+        'n_inner': n_inner,
+        'original_population': original_pop,
+        'reduction_factor': original_pop / n_inner,
+        'variance_pilot_used': variance_pilot_results is not None
+    }
+
+    if variance_pilot_results:
+        results['two_level_psa']['variance_components'] = variance_pilot_results.get('variance_components', {})
+
+    return results
+
+
 # Visuals
 
 def save_or_show(save_path, show=False, label="plot"):
