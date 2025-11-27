@@ -317,7 +317,8 @@ general_config = {
 
     # Probabilistic sensitivity analysis configuration (sampling specs defined below)
     'psa': {
-        'use': False,
+        'use': True,
+        'two_level_only': True,      # if True, skip full-population PSA and only run two-level ANOVA PSA
         'iterations': 1000,
         'seed': 20231113,
         'n_jobs': None,             # Number of parallel jobs (None = use all CPU cores)
@@ -621,8 +622,8 @@ general_config = {
         },
         'CVD_disease': {
             'prevalence': {
-                'female': 0.003,   #(VERIFIED, British Heart Foundation)
-                'male': 0.003,     #(VERIFIED, British Heart Foundation)
+                'female': 0.095,   #(VERIFIED, British Heart Foundation)
+                'male': 0.095,     #(VERIFIED, British Heart Foundation)
             },
             'relative_risks': {
                 'onset': {
@@ -4511,25 +4512,55 @@ if __name__ == "__main__":
 
     psa_cfg = general_config.get('psa', {})
     if psa_cfg.get('use', False):
-        psa_results = run_probabilistic_sensitivity_analysis(
+        run_standard_psa = not psa_cfg.get('two_level_only', False)
+
+        if run_standard_psa:
+            # Standard PSA (full population per draw)
+            psa_results = run_probabilistic_sensitivity_analysis(
+                general_config,
+                psa_cfg,
+                collect_draw_level=False,
+                seed=run_seed,
+            )
+            summary = psa_results.get('summary', {})
+            if summary:
+                print("\nProbabilistic sensitivity analysis (95% CI):")
+                focus_metrics = [
+                    'total_costs_all',
+                    'total_qalys_combined',
+                    'incident_onsets_total',
+                    'stage_mild',
+                    'stage_moderate',
+                    'stage_severe',
+                ]
+                for metric in focus_metrics:
+                    stats = summary.get(metric)
+                    if not stats:
+                        continue
+                    mean_val = stats.get('mean')
+                    lo = stats.get('lower_95')
+                    hi = stats.get('upper_95')
+                    print(f"  {metric}: mean={mean_val:.2f}, 95% CI [{lo:.2f}, {hi:.2f}]")
+
+        # Two-level ANOVA PSA (reduced population per draw)
+        two_level_results = run_two_level_psa(
             general_config,
             psa_cfg,
+            n_outer=psa_cfg.get('iterations', 1000),
+            variance_pilot_results=None,  # supply pilot output here if available
             collect_draw_level=False,
             seed=run_seed,
+            n_jobs=psa_cfg.get('n_jobs')
         )
-        summary = psa_results.get('summary', {})
-        if summary:
-            print("\nProbabilistic sensitivity analysis (95% CI):")
-            focus_metrics = [
+        two_level_summary = two_level_results.get('summary', {})
+        if two_level_summary:
+            print("\nTwo-level PSA (95% CI using O'Hagan method):")
+            for metric in [
                 'total_costs_all',
                 'total_qalys_combined',
                 'incident_onsets_total',
-                'stage_mild',
-                'stage_moderate',
-                'stage_severe',
-            ]
-            for metric in focus_metrics:
-                stats = summary.get(metric)
+            ]:
+                stats = two_level_summary.get(metric)
                 if not stats:
                     continue
                 mean_val = stats.get('mean')
