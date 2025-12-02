@@ -256,7 +256,7 @@ def _sample_risk_factor_relative_risks(risk_defs: Dict[str, dict],
 
 
 general_config = {
-    'number_of_timesteps': 1,
+    'number_of_timesteps': 17,
     'population': 33167098,
          
     'time_step_years': 1,
@@ -4635,76 +4635,78 @@ if __name__ == "__main__":
     plot_onset_probability_vs_age_from_base_prob(general_config, show=True)
     export_results_to_excel(model_results)
 
-    # Calibration regression for observed vs predicted prevalence (2024)
-    import os
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
-    # -------- 1. Data (paste directly) --------
-    data = [
-        [35, 49, "F", 0.0001, 0.000776677],
-        [50, 64, "F", 0.0012, 0.003178285],
-        [65, 79, "F", 0.0178, 0.024883946],
-        [80, None, "F", 0.1244, 0.13821326],
-        [35, 49, "M", 0.0001, 0.000971348],
-        [50, 64, "M", 0.0013, 0.003344429],
-        [65, 79, "M", 0.0168, 0.023354982],
-        [80, None, "M", 0.0910, 0.10122974],
-    ]
-    df = pd.DataFrame(data, columns=["age_lower", "age_upper", "sex", "obs", "pred"])
-    df["age_band"] = df.apply(
-        lambda r: f"{int(r.age_lower)}+" if pd.isna(r.age_upper)
-        else f"{int(r.age_lower)}-{int(r.age_upper)}",
-        axis=1
-    )
+# -------- 1. Data (paste directly) --------
+data = [
+    [35, 49, "F", 0.0001, 0.000776677],
+    [50, 64, "F", 0.0012, 0.003178285],
+    [65, 79, "F", 0.0178, 0.024883946],
+    [80, None, "F", 0.1244, 0.13821326],
+    [35, 49, "M", 0.0001, 0.000971348],
+    [50, 64, "M", 0.0013, 0.003344429],
+    [65, 79, "M", 0.0168, 0.023354982],
+    [80, None, "M", 0.0910, 0.10122974],
+]
+df = pd.DataFrame(data, columns=["age_lower","age_upper","sex","obs","pred"])
+df["age_band"] = df.apply(
+    lambda r: f"{int(r.age_lower)}+" if pd.isna(r.age_upper)
+    else f"{int(r.age_lower)}-{int(r.age_upper)}", axis=1
+)
 
-    # -------- 2. Output folder --------
-    save_dir = r"C:\Users\EdwardCoote\OneDrive\DementiaModel\plots"
-    os.makedirs(save_dir, exist_ok=True)
+# -------- 2. Output folder --------
+save_dir = r"C:\Users\EdwardCoote\OneDrive\DementiaModel\plots"
+os.makedirs(save_dir, exist_ok=True)
 
-    # -------- 3. Simple OLS regression (no statsmodels) --------
-    def ols_fit(x, y):
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
-        X = np.column_stack((np.ones_like(x), x))
-        beta = np.linalg.inv(X.T @ X) @ (X.T @ y)
-        y_hat = X @ beta
-        resid = y - y_hat
-        ss_tot = np.sum((y - y.mean())**2)
-        ss_res = np.sum(resid**2)
-        r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-        return {"alpha": beta[0], "beta": beta[1], "r2": r2}
+# -------- 3. Simple OLS regression (no statsmodels) --------
+def ols_fit(x, y):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    X = np.column_stack((np.ones_like(x), x))
+    beta = np.linalg.inv(X.T @ X) @ (X.T @ y)
+    y_hat = X @ beta
+    resid = y - y_hat
+    ss_tot = np.sum((y - y.mean())**2)
+    ss_res = np.sum(resid**2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return {"alpha": beta[0], "beta": beta[1], "r2": r2}
 
-    # -------- 4. Run regression + save plot --------
-    def run_and_save(sub, sex_label, save_dir):
-        res = ols_fit(sub["pred"], sub["obs"])
-        alpha, beta, R2 = res["alpha"], res["beta"], res["r2"]
-        print(f"\nSex = {sex_label}")
-        print(f"  Alpha (intercept): {alpha:.6f}")
-        print(f"  Beta (slope):     {beta:.6f}")
-        print(f"  R^2:              {R2:.3f}")
+# -------- 4. Run regression + save plot --------
+def run_and_save(sub, sex_label, save_dir):
+    res = ols_fit(sub["pred"], sub["obs"])
+    alpha, beta, R2 = res["alpha"], res["beta"], res["r2"]
+    print(f"\nSex = {sex_label}")
+    print(f"  α (intercept): {alpha:.6f}")
+    print(f"  β (slope):     {beta:.6f}")
+    print(f"  R²:            {R2:.3f}")
 
-        plt.figure(figsize=(6, 6))
-        plt.scatter(sub["pred"], sub["obs"], s=90)
-        xmax = max(sub["pred"].max(), sub["obs"].max()) * 1.05
-        x = np.linspace(0, xmax, 100)
-        plt.plot(x, x, "k--", label="1:1 line")
-        plt.plot(x, alpha + beta * x, "r-", label=f"Fitted (beta={beta:.2f})")
-        for _, r in sub.iterrows():
-            plt.annotate(r["age_band"], (r["pred"], r["obs"]), xytext=(4, 4),
-                         textcoords="offset points", fontsize=8)
-        plt.xlabel("Predicted prevalence (2024)")
-        plt.ylabel("Observed prevalence (2024)")
-        plt.title(f"Calibration Prevalence 2024 ({sex_label})")
-        plt.legend()
-        plt.grid(True, linestyle="--", alpha=0.4)
-        plt.tight_layout()
+    plt.figure(figsize=(6,6))
+    plt.scatter(sub["pred"], sub["obs"], s=90)
+    xmax = max(sub["pred"].max(), sub["obs"].max()) * 1.05
+    x = np.linspace(0, xmax, 100)
+    plt.plot(x, x, "k--", label="1:1 line")
+    plt.plot(x, alpha + beta*x, "r-", label=f"Fitted (β={beta:.2f})")
+    for _, r in sub.iterrows():
+        plt.annotate(r["age_band"], (r["pred"], r["obs"]), xytext=(4,4),
+                     textcoords="offset points", fontsize=8)
+    plt.xlabel("Predicted prevalence (2024)")
+    plt.ylabel("Observed prevalence (2024)")
+    plt.title(f"Calibration — Prevalence 2024 ({sex_label})")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.tight_layout()
 
-        file_path = os.path.join(save_dir, f"calibration_prevalence_{sex_label}.png")
-        plt.savefig(file_path, dpi=300)
-        plt.close()
-        print(f"  Plot saved to: {file_path}")
+    # Save the plot
+    file_path = os.path.join(save_dir, f"calibration_prevalence_{sex_label}.png")
+    plt.savefig(file_path, dpi=300)
+    plt.close()
+    print(f"  → Plot saved to: {file_path}")
 
-        return res
+    return res
 
-    # -------- 5. Run for both sexes --------
-    res_f = run_and_save(df[df["sex"] == "F"], "Female", save_dir)
-    res_m = run_and_save(df[df["sex"] == "M"], "Male", save_dir)
+# -------- 5. Run for both sexes --------
+res_f = run_and_save(df[df["sex"]=="F"], "Female", save_dir)
+res_m = run_and_save(df[df["sex"]=="M"], "Male", save_dir)
