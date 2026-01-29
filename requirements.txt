@@ -1,0 +1,16 @@
+# Core dependencies for research scripts (IBM_PD_AD.py, generate_cvd_figures.py)
+# For backend web app dependencies, see backend/requirements.txt
+
+# Scientific Computing
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Excel I/O
+openpyxl>=3.1.0
+
+# Optional: Progress bars (gracefully handled if missing)
+tqdm>=4.65.0
